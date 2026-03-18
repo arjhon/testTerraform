@@ -1,0 +1,45 @@
+version: "3.8"
+
+# =============================================================================
+# docker-compose.yml – Run rover to visualise your Terraform plan
+#
+# Usage:
+#   1. Generate a plan:
+#        terraform plan -var-file=environments/dev/terraform.tfvars \
+#          -out=/tmp/tfplan.binary
+#        terraform show -json /tmp/tfplan.binary > /tmp/tfplan.json
+#
+#   2. Start rover:
+#        PLAN_JSON=/tmp/tfplan.json docker compose up rover
+#
+#   3. Open http://localhost:9000 in your browser.
+# =============================================================================
+
+services:
+  rover:
+    image: im2nguyen/rover:latest
+    container_name: rover
+    ports:
+      - "9000:9000"
+    volumes:
+      - "${PLAN_JSON:-/tmp/tfplan.json}:/rover/plan.json:ro"
+    environment:
+      PLAN_JSON: /rover/plan.json
+    restart: "no"
+
+  # ── Optional: Terraform runner ──────────────────────────────────────────────
+  # Use this service to run Terraform inside a container without installing it
+  # locally.  Mount your Azure credentials and run plan / apply from here.
+  terraform:
+    image: hashicorp/terraform:1.7
+    container_name: terraform-runner
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - ${HOME}/.azure:/root/.azure:ro
+    environment:
+      ARM_USE_AZUREAD: "true"
+    entrypoint: ["terraform"]
+    command: ["--help"]
+    profiles:
+      - tools
