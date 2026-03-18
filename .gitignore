@@ -1,0 +1,43 @@
+# Terraform state files
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Terraform plan files
+*.tfplan
+*.binary
+
+# Terraform working directory
+.terraform/
+.terraform.lock.hcl
+
+# Override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Sensitive variable files
+*.auto.tfvars
+my.tfvars
+secrets.tfvars
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Rover / temporary plan JSON
+rover-output/
+/tmp/
+
+# Docker build artifacts
+*.tar
+
+# macOS
+.DS_Store
+
+# Editor directories and files
+.idea/
+.vscode/
+*.swp
+*.swo
