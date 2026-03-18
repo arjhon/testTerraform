@@ -11,6 +11,8 @@ A production-ready [Azure Landing Zone](https://learn.microsoft.com/en-us/azure/
 - [Modules](#modules)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
+- [CI/CD Pipelines](#cicd-pipelines)
+- [Docker Container](#docker-container)
 - [Rover – Terraform Visualiser](#rover--terraform-visualiser)
 - [Environment Configuration](#environment-configuration)
 - [Contributing](#contributing)
@@ -44,23 +46,29 @@ The landing zone provisions five capability areas:
 
 ```
 .
-├── main.tf                     # Root module – wires up all child modules
-├── variables.tf                # All input variables with validation & defaults
-├── outputs.tf                  # Key outputs (VNet IDs, KV URI, etc.)
-├── versions.tf                 # Provider version constraints
-├── rover.sh                    # Convenience script to launch rover
-├── docker-compose.yml          # docker compose services for rover & Terraform
+├── main.tf                          # Root module – wires up all child modules
+├── variables.tf                     # All input variables with validation & defaults
+├── outputs.tf                       # Key outputs (VNet IDs, KV URI, etc.)
+├── versions.tf                      # Provider version constraints
+├── Dockerfile                       # Container with Terraform + Azure CLI + rover
+├── docker-entrypoint.sh             # Container entrypoint (plan / apply / rover)
+├── docker-compose.yml               # docker compose services for rover & Terraform
+├── rover.sh                         # Convenience script to launch rover locally
+├── .github/
+│   └── workflows/
+│       ├── ci.yml                   # Build & push container to Azure Container Registry
+│       └── cd.yml                   # Terraform plan/apply + rover visualisation
 ├── environments/
 │   ├── dev/
-│   │   └── terraform.tfvars   # Dev environment variable values
+│   │   └── terraform.tfvars        # Dev environment variable values
 │   └── prod/
-│       └── terraform.tfvars   # Prod environment variable values
+│       └── terraform.tfvars        # Prod environment variable values
 └── modules/
-    ├── management_groups/      # Azure Management Group hierarchy
-    ├── networking/             # Hub-spoke network topology
-    ├── identity/               # Key Vault & RBAC
-    ├── policy/                 # Azure Policy assignments
-    └── monitoring/             # Log Analytics & Defender for Cloud
+    ├── management_groups/           # Azure Management Group hierarchy
+    ├── networking/                  # Hub-spoke network topology
+    ├── identity/                    # Key Vault & RBAC
+    ├── policy/                      # Azure Policy assignments
+    └── monitoring/                  # Log Analytics & Defender for Cloud
 ```
 
 ---
@@ -173,6 +181,97 @@ terraform apply -var-file=environments/prod/terraform.tfvars
 
 ---
 
+## CI/CD Pipelines
+
+Two GitHub Actions workflows are included under `.github/workflows/`.
+
+### `ci.yml` – Build & Push Container
+
+Triggered on push/PR to `main`/`master` when `Dockerfile` changes, and on manual dispatch.
+
+| Step | Description |
+|---|---|
+| Checkout | Clone repository |
+| Setup Buildx | Multi-arch Docker builder |
+| Login to ACR | Authenticate to Azure Container Registry |
+| Build & Push | Build image, push on merge (skip push on PRs) |
+
+**Required secrets:**
+
+| Secret | Description |
+|---|---|
+| `ACR_LOGIN_SERVER` | e.g. `mylzregistry.azurecr.io` |
+| `ACR_USERNAME` | Service principal App ID or ACR admin username |
+| `ACR_PASSWORD` | Service principal secret or ACR admin password |
+
+### `cd.yml` – Deploy Landing Zone
+
+Triggered on push/PR to `main`/`master` when `.tf` / `.tfvars` files change, or on manual dispatch.
+
+| Job | Runs when |
+|---|---|
+| `plan` | Always |
+| `rover` | After a successful plan |
+| `apply` | After plan, on `main`/`master` or manual `apply` dispatch |
+
+**Required secrets:** all of the above plus `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET`, `ARM_SUBSCRIPTION_ID`, `ARM_TENANT_ID`.
+
+**Required repository variables** (Settings → Variables):
+
+| Variable | Description |
+|---|---|
+| `TF_STATE_RG` | Resource group for Terraform remote state storage account |
+| `TF_STATE_SA` | Storage account name |
+| `TF_STATE_CONTAINER` | Blob container name |
+
+The `apply` job targets the `dev` or `prod` GitHub Environment so you can configure required reviewers / protection rules before production deploys.
+
+---
+
+## Docker Container
+
+The `Dockerfile` bundles **Terraform**, **Azure CLI** and **rover** into a single image so deployments need no local tooling.
+
+### Build locally
+
+```bash
+docker build -t azure-lz-rover:latest .
+```
+
+### Run
+
+```bash
+# Plan dev environment
+docker run --rm \
+  -e ARM_CLIENT_ID=<id> \
+  -e ARM_CLIENT_SECRET=<secret> \
+  -e ARM_SUBSCRIPTION_ID=<sub> \
+  -e ARM_TENANT_ID=<tenant> \
+  -v $(pwd):/workspace \
+  azure-lz-rover:latest plan dev
+
+# Apply prod environment
+docker run --rm \
+  -e ARM_CLIENT_ID=<id> \
+  -e ARM_CLIENT_SECRET=<secret> \
+  -e ARM_SUBSCRIPTION_ID=<sub> \
+  -e ARM_TENANT_ID=<tenant> \
+  -v $(pwd):/workspace \
+  azure-lz-rover:latest apply prod
+
+# Generate rover report
+docker run --rm \
+  -e ARM_CLIENT_ID=<id> \
+  -e ARM_CLIENT_SECRET=<secret> \
+  -e ARM_SUBSCRIPTION_ID=<sub> \
+  -e ARM_TENANT_ID=<tenant> \
+  -v $(pwd):/workspace \
+  -v /tmp/rover-output:/tmp/rover-output \
+  azure-lz-rover:latest rover dev
+```
+
+---
+
 ## Rover – Terraform Visualiser
 
 [Rover](https://github.com/im2nguyen/rover) renders an **interactive diagram** of your Terraform plan so you can explore resource relationships, spot configuration drift, and understand the blast radius of a change – all before running `apply`.
@@ -223,6 +322,7 @@ docker run --rm \
 | Variable | Dev default | Prod default |
 |---|---|---|
 | `environment` | `dev` | `prod` |
+| `location` | `westeurope` | `westeurope` |
 | `enable_firewall` | `false` | `true` |
 | `enable_vpn_gateway` | `false` | `true` |
 | `log_analytics_workspace.retention_in_days` | `30` | `90` |

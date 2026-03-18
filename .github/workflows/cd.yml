@@ -1,0 +1,236 @@
+# =============================================================================
+# cd.yml – Deploy Azure Landing Zone with Terraform and visualise with rover
+#
+# Flow:
+#   plan  → terraform init + plan (always)
+#   rover → generate rover visualisation artifact
+#   apply → terraform apply (main/master only, requires approval for prod)
+#
+# Required GitHub secrets:
+#   ARM_CLIENT_ID       – Service principal application ID
+#   ARM_CLIENT_SECRET   – Service principal secret
+#   ARM_SUBSCRIPTION_ID – Target Azure subscription ID
+#   ARM_TENANT_ID       – Azure AD tenant ID
+#   ACR_LOGIN_SERVER    – e.g. mylzregistry.azurecr.io  (for rover image pull)
+#   ACR_USERNAME        – Service principal or ACR admin username
+#   ACR_PASSWORD        – Service principal or ACR admin password
+#
+# Required GitHub variables (Settings → Variables):
+#   TF_STATE_RG         – Resource group holding the Terraform remote state SA
+#   TF_STATE_SA         – Storage account name for remote state
+#   TF_STATE_CONTAINER  – Blob container name for remote state
+# =============================================================================
+name: "Deploy Landing Zone"
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+      - ".github/workflows/cd.yml"
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - prod
+      action:
+        description: "Terraform action"
+        required: true
+        default: "plan"
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+env:
+  TF_VERSION: "1.7.0"
+  ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+  ROVER_IMAGE: im2nguyen/rover:latest
+
+jobs:
+  # ── Determine environment ────────────────────────────────────────────────────
+  setup:
+    name: "Setup"
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      tf_action: ${{ steps.env.outputs.tf_action }}
+    steps:
+      - name: Determine environment and action
+        id: env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+            echo "tf_action=${{ inputs.action }}"        >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" || "${{ github.ref }}" == "refs/heads/master" ]]; then
+            echo "environment=prod" >> "$GITHUB_OUTPUT"
+            echo "tf_action=apply"  >> "$GITHUB_OUTPUT"
+          else
+            echo "environment=dev"  >> "$GITHUB_OUTPUT"
+            echo "tf_action=plan"   >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Terraform plan ───────────────────────────────────────────────────────────
+  plan:
+    name: "Terraform Plan (${{ needs.setup.outputs.environment }})"
+    runs-on: ubuntu-latest
+    needs: setup
+    permissions:
+      contents: read
+    environment: ${{ needs.setup.outputs.environment }}
+    env:
+      TFVARS_FILE: environments/${{ needs.setup.outputs.environment }}/terraform.tfvars
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TF_STATE_RG }}" \
+            -backend-config="storage_account_name=${{ vars.TF_STATE_SA }}" \
+            -backend-config="container_name=${{ vars.TF_STATE_CONTAINER }}" \
+            -backend-config="key=${{ needs.setup.outputs.environment }}.terraform.tfstate" \
+            -input=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -var-file="${{ env.TFVARS_FILE }}" \
+            -out=tfplan.binary \
+            -input=false
+          terraform show -json tfplan.binary > tfplan.json
+
+      - name: Upload plan artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ needs.setup.outputs.environment }}
+          path: |
+            tfplan.binary
+            tfplan.json
+          retention-days: 5
+
+  # ── Rover visualisation ──────────────────────────────────────────────────────
+  rover:
+    name: "Rover Visualisation (${{ needs.setup.outputs.environment }})"
+    runs-on: ubuntu-latest
+    needs: [setup, plan]
+    permissions: {}
+    if: always() && needs.plan.result == 'success'
+
+    steps:
+      - name: Download plan artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ needs.setup.outputs.environment }}
+
+      - name: Log in to ACR (for rover image)
+        id: acr-login
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+        continue-on-error: true
+
+      - name: Report image source
+        run: |
+          if [[ "${{ steps.acr-login.outcome }}" == "success" ]]; then
+            echo "Using rover image from ACR: ${{ secrets.ACR_LOGIN_SERVER }}"
+          else
+            echo "ACR login was skipped or failed – falling back to public Docker Hub image (im2nguyen/rover)"
+          fi
+
+      - name: Generate rover static assets
+        run: |
+          mkdir -p rover-output
+          docker run --rm \
+            -v "$(pwd)/tfplan.json:/rover/plan.json:ro" \
+            -v "$(pwd)/rover-output:/rover/output" \
+            -e PLAN_JSON=/rover/plan.json \
+            "${{ env.ROVER_IMAGE }}" \
+            -tfJSONPlan /rover/plan.json \
+            -standalone true \
+            -output /rover/output \
+            || true   # non-zero exit still uploads whatever was produced
+
+      - name: Upload rover artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rover-${{ needs.setup.outputs.environment }}
+          path: rover-output/
+          retention-days: 14
+
+  # ── Terraform apply ──────────────────────────────────────────────────────────
+  apply:
+    name: "Terraform Apply (${{ needs.setup.outputs.environment }})"
+    runs-on: ubuntu-latest
+    needs: [setup, plan]
+    permissions:
+      contents: read
+    if: |
+      needs.plan.result == 'success' &&
+      needs.setup.outputs.tf_action == 'apply'
+    environment: ${{ needs.setup.outputs.environment }}
+    env:
+      TFVARS_FILE: environments/${{ needs.setup.outputs.environment }}/terraform.tfvars
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TF_STATE_RG }}" \
+            -backend-config="storage_account_name=${{ vars.TF_STATE_SA }}" \
+            -backend-config="container_name=${{ vars.TF_STATE_CONTAINER }}" \
+            -backend-config="key=${{ needs.setup.outputs.environment }}.terraform.tfstate" \
+            -input=false
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ needs.setup.outputs.environment }}
+
+      - name: Terraform Apply
+        run: |
+          terraform apply \
+            -input=false \
+            -auto-approve \
+            tfplan.binary

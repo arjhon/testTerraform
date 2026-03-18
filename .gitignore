@@ -27,7 +27,11 @@ crash.log
 crash.*.log
 
 # Rover / temporary plan JSON
+rover-output/
 /tmp/
+
+# Docker build artifacts
+*.tar
 
 # macOS
 .DS_Store

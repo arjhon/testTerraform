@@ -13,7 +13,7 @@ variable "environment" {
 variable "location" {
   description = "The Azure region where resources will be deployed."
   type        = string
-  default     = "eastus"
+  default     = "westeurope"
 }
 
 variable "landing_zone_name" {

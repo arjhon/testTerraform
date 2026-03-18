@@ -1,6 +1,6 @@
 # ── General ────────────────────────────────────────────────────────────────────
 environment       = "dev"
-location          = "eastus"
+location          = "westeurope"
 landing_zone_name = "azure-lz"
 tenant_id         = "<YOUR_TENANT_ID>"
 
